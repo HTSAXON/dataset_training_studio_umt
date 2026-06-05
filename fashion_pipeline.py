@@ -431,3 +431,48 @@ def load_metrics() -> dict[str, object] | None:
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
+
+def load_training_history() -> list[dict[str, float | int]]:
+    path = HISTORY_PATH if HISTORY_PATH.exists() else LEGACY_HISTORY_PATH
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def predict_sample(model_bundle: dict[str, object], image_vector: np.ndarray) -> dict[str, object]:
+    model: MLPClassifier = model_bundle["model"]
+    class_names = list(model_bundle.get("class_names", CLASS_NAMES))
+    sample = np.asarray(image_vector, dtype=np.float32).reshape(1, -1)
+    probabilities = model.predict_proba(sample)[0]
+    predicted_position = int(np.argmax(probabilities))
+    predicted_index = int(model.classes_[predicted_position])
+    probability_map = {
+        class_names[int(class_value)]: round(float(probabilities[position]), 4)
+        for position, class_value in enumerate(model.classes_)
+    }
+    label = class_names[predicted_index]
+    return {
+        "label_index": predicted_index,
+        "label": label,
+        "probability": probability_map[label],
+        "all_probabilities": probability_map,
+    }
+
+
+def random_test_example(
+    seed: int | None = None,
+    dataset_path: str | Path | None = None,
+) -> dict[str, object]:
+    data = load_dataset(dataset_path)
+    class_names = list(data["class_names"])
+    rng = np.random.default_rng(seed)
+    index = int(rng.integers(0, len(data["test_images"])))
+    label_index = int(data["test_labels"][index])
+    return {
+        "index": index,
+        "image": data["test_images"][index],
+        "label_index": label_index,
+        "label": class_names[label_index],
+        "dataset_name": data["dataset_name"],
+        "source_path": data["source_path"],
+    }
