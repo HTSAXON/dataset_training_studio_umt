@@ -1359,3 +1359,15 @@ def training_worker(
             STATE.stage = "idle"
             STATE.status = "Training stopped." if error.__class__.__name__ == "KeyboardInterrupt" else "Training failed."
             STATE.error = str(error)
+
+def run_server() -> None:
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    url = f"http://{HOST}:{PORT}"
+    print(f"Fashion-MNIST Training Studio running at {url}")
+    print("Press Ctrl+C to stop the server.")
+    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    run_server()
