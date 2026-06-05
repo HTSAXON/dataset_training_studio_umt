@@ -79,6 +79,7 @@ class AppState:
 
 STATE = AppState()
 
+
 HTML = r"""<!doctype html>
 <html lang="en">
 <head>
