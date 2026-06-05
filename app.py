@@ -1102,3 +1102,184 @@ HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def _read_json(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length == 0:
+            return {}
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def _send(self, status: int, payload: object, content_type: str = "application/json") -> None:
+        if content_type == "application/json":
+            body = json.dumps(payload).encode("utf-8")
+        else:
+            body = str(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, status: int, message: str) -> None:
+        self._send(status, {"error": message})
+
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/":
+            self._send(200, HTML, "text/html")
+            return
+        if path == "/api/state":
+            self._send(200, STATE.snapshot())
+            return
+        self._error(404, "Not found")
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        try:
+            if path == "/api/download":
+                self.handle_download()
+            elif path == "/api/load_dataset":
+                self.handle_load_dataset()
+            elif path == "/api/train":
+                self.handle_train()
+            elif path == "/api/sample":
+                self.handle_sample()
+            elif path == "/api/predict":
+                self.handle_predict()
+            elif path == "/api/stop":
+                self.handle_stop()
+            else:
+                self._error(404, "Not found")
+        except Exception as error:
+            self._error(500, str(error))
+
+    def handle_download(self) -> None:
+        download_dataset()
+        summary = dataset_summary(load_dataset())
+        with STATE.lock:
+            STATE.dataset = summary
+            STATE.dataset_path = None
+            STATE.class_names = list(summary["class_names"])
+            STATE.model_bundle = None
+            STATE.metrics = None
+            STATE.history = []
+            STATE.batch = None
+            STATE.sample = None
+            STATE.prediction = None
+            STATE.stage = "dataset"
+            STATE.status = "Fashion-MNIST demo dataset is ready."
+            STATE.error = None
+        self._send(200, STATE.snapshot())
+
+    def handle_load_dataset(self) -> None:
+        body = self._read_json()
+        dataset_path = str(body.get("datasetPath", "")).strip()
+        if not dataset_path:
+            self._error(400, "Enter a dataset folder path.")
+            return
+        data = load_dataset(dataset_path)
+        summary = dataset_summary(data)
+        with STATE.lock:
+            STATE.dataset = summary
+            STATE.dataset_path = summary["source_path"]
+            STATE.class_names = list(summary["class_names"])
+            STATE.model_bundle = None
+            STATE.metrics = None
+            STATE.history = []
+            STATE.batch = None
+            STATE.sample = None
+            STATE.prediction = None
+            STATE.stage = "dataset"
+            STATE.status = f"{summary['name']} is ready."
+            STATE.error = None
+        self._send(200, STATE.snapshot())
+
+    def handle_train(self) -> None:
+        body = self._read_json()
+        epochs = int(body.get("epochs", 5))
+        batch_size = int(body.get("batchSize", 512))
+        delay_ms = int(body.get("delayMs", 180))
+        dataset_path = str(body.get("datasetPath", "")).strip() or None
+
+        with STATE.lock:
+            if STATE.training_running:
+                self._error(409, "Training is already running.")
+                return
+            STATE.training_running = True
+            STATE.stop_training = False
+            STATE.dataset_path = dataset_path
+            STATE.stage = "training"
+            STATE.status = "Training started."
+            STATE.history = []
+            STATE.batch = None
+            STATE.prediction = None
+            STATE.error = None
+
+        thread = threading.Thread(
+            target=training_worker,
+            args=(epochs, batch_size, delay_ms, dataset_path),
+            daemon=True,
+        )
+        thread.start()
+        self._send(202, STATE.snapshot())
+
+    def handle_sample(self) -> None:
+        with STATE.lock:
+            dataset_path = STATE.dataset_path
+        sample = random_test_example(random.randint(0, 10_000_000), dataset_path=dataset_path)
+        payload = {
+            "index": sample["index"],
+            "label": sample["label"],
+            "label_index": sample["label_index"],
+            "image": image_payload(sample["image"]),
+            "dataset_name": sample["dataset_name"],
+        }
+        with STATE.lock:
+            STATE.sample = payload
+            STATE.prediction = None
+            STATE.stage = "sample"
+            STATE.status = "Test image loaded."
+        self._send(200, STATE.snapshot())
+
+    def handle_predict(self) -> None:
+        with STATE.lock:
+            sample = STATE.sample
+            model_bundle = STATE.model_bundle
+        if sample is None:
+            self._error(400, "Load a sample first.")
+            return
+        if model_bundle is None:
+            model_bundle = load_model()
+
+        with STATE.lock:
+            STATE.stage = "predicting"
+            STATE.status = "Prediction running."
+
+        time.sleep(0.35)
+        prediction = predict_sample(model_bundle, np.asarray(sample["image"], dtype=np.float32))
+        with STATE.lock:
+            STATE.model_bundle = model_bundle
+            STATE.prediction = prediction
+            STATE.stage = "classified"
+            STATE.status = "Sample classified."
+        time.sleep(0.45)
+        with STATE.lock:
+            STATE.stage = "result"
+            STATE.status = "Prediction complete."
+        self._send(200, STATE.snapshot())
+
+    def handle_stop(self) -> None:
+        with STATE.lock:
+            if not STATE.training_running:
+                self._error(400, "Training is not running.")
+                return
+            STATE.stop_training = True
+            STATE.status = "Stopping training..."
+        self._send(200, STATE.snapshot())
+
