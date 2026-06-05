@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+models/
+.serena/
+.spec-workflow/
+.spec-workflow-mcp/
