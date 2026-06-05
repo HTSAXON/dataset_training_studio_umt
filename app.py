@@ -1283,3 +1283,79 @@ class Handler(BaseHTTPRequestHandler):
             STATE.status = "Stopping training..."
         self._send(200, STATE.snapshot())
 
+
+def training_worker(
+    epochs: int,
+    batch_size: int,
+    delay_ms: int,
+    dataset_path: str | None,
+) -> None:
+    def progress(event: dict[str, object]) -> None:
+        with STATE.lock:
+            if event["type"] == "batch":
+                class_names = list(event.get("class_names") or STATE.class_names)
+                labels = [class_names[int(label)] for label in event["preview_labels"]]
+                STATE.class_names = class_names
+                STATE.batch = {
+                    "epoch": event["epoch"],
+                    "batch": event["batch"],
+                    "num_batches": event["num_batches"],
+                    "loss": event["loss"],
+                    "batch_accuracy": event["batch_accuracy"],
+                    "images": [image_payload(image) for image in event["preview_images"][:8]],
+                    "labels": labels,
+                }
+                STATE.history.append(
+                    {
+                        "epoch": event["epoch"],
+                        "batch": event["batch"],
+                        "progress": event["progress"],
+                        "loss": event["loss"],
+                        "batch_accuracy": event["batch_accuracy"],
+                    }
+                )
+                STATE.stage = "training"
+                STATE.status = (
+                    f"Training epoch {event['epoch']}, batch {event['batch']} of {event['num_batches']} "
+                    f"- loss {event['loss']}, batch accuracy {event['batch_accuracy']}."
+                )
+            elif event["type"] == "epoch":
+                STATE.history.append(
+                    {
+                        "epoch": event["epoch"],
+                        "loss": event["loss"],
+                        "train_accuracy": event["train_accuracy"],
+                        "test_accuracy": event["test_accuracy"],
+                    }
+                )
+                STATE.status = f"Epoch {event['epoch']} complete."
+
+    try:
+        result = train_with_progress(
+            epochs=epochs,
+            batch_size=batch_size,
+            progress_delay_ms=delay_ms,
+            progress_callback=progress,
+            dataset_path=dataset_path,
+            should_stop=lambda: STATE.stop_training,
+        )
+        with STATE.lock:
+            STATE.model_bundle = result["model_bundle"]
+            STATE.metrics = result["metrics"]
+            STATE.dataset = result["summary"]
+            STATE.dataset_path = result["summary"]["source_path"] if dataset_path else None
+            STATE.class_names = list(result["summary"]["class_names"])
+            STATE.history = result["history"]
+            STATE.batch = None
+            STATE.training_running = False
+            STATE.stop_training = False
+            STATE.stage = "model"
+            STATE.status = "Training complete. Model is ready."
+            STATE.error = None
+    except Exception as error:
+        with STATE.lock:
+            STATE.training_running = False
+            STATE.stop_training = False
+            STATE.stage = "idle"
+            STATE.status = "Training stopped." if error.__class__.__name__ == "KeyboardInterrupt" else "Training failed."
+            STATE.error = str(error)
